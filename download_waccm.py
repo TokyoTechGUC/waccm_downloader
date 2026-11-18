@@ -520,7 +520,31 @@ def merge_netcdf_files(file_list, output_path, target_vars=None):
                 common_vars = filtered_common
 
         sub_list = [ds[common_vars] for ds in ds_list]
-        merged = xr.concat(sub_list, dim='time')
+
+        # Align spatial grids (lat/lon) to prevent floating-point 1-ULP mismatches or
+        # missing edge points from creating duplicate NaN-filled coordinates on concat.
+        ref_ds = max(sub_list, key=lambda d: (d.sizes.get('lat', 0), d.sizes.get('lon', 0)))
+        if 'lat' in ref_ds.coords and 'lon' in ref_ds.coords:
+            import numpy as np
+            ref_lat = ref_ds['lat'].values
+            ref_lon = ref_ds['lon'].values
+            aligned_list = []
+            for d in sub_list:
+                # Snap near-identical coordinates within 1e-4 deg, then fill any missing edge via nearest
+                d_lat = d['lat'].values
+                d_lon = d['lon'].values
+                if len(d_lat) == len(ref_lat) and np.allclose(d_lat, ref_lat, atol=1e-4):
+                    d = d.assign_coords(lat=ref_lat)
+                else:
+                    d = d.reindex(lat=ref_lat, method='nearest', tolerance=1.5)
+                if len(d_lon) == len(ref_lon) and np.allclose(d_lon, ref_lon, atol=1e-4):
+                    d = d.assign_coords(lon=ref_lon)
+                else:
+                    d = d.reindex(lon=ref_lon, method='nearest', tolerance=1.5)
+                aligned_list.append(d)
+            sub_list = aligned_list
+
+        merged = xr.concat(sub_list, dim='time', join='exact')
         if 'time' in merged.coords:
             merged = merged.sortby('time')
         merged.to_netcdf(output_path)
